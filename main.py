@@ -336,11 +336,9 @@ def train_new_poisoned_model(unlearnable_dataset, MAX_EPOCH=20, BATCH_SIZE=128):
                 
                 _, predicted = torch.max(logits.data, 1)
                 acc = (predicted == labels).sum().item()/labels.size(0)
-                acc_meter.update(acc)
-                loss_meter.update(loss.item())
-                pbar.set_description("Acc %.4f Loss: %.4f" % (acc_meter.avg*100, loss_meter.avg))
+                pbar.set_description("Acc %.4f Loss: %.4f" % (acc*100, loss))
             scheduler.step()
-            print('Poison train Terminated.')
+            print('Poison train Terminated at epoch {}.'.format(epoch+1))
         # Eval
         model.eval()
         correct, total = 0, 0
@@ -398,7 +396,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(params=base_model.parameters(), lr=0.1, weight_decay=0.0005, momentum=0.9)
 
     similar_imgs = find_similar_img(clean_target, NUM_POISON)
-    interpolation_imgs = linear_interpolation(clean_target, similar_imgs, alpha=0.5)  # clean_target:0-1
+    interpolation_imgs = linear_interpolation(clean_target, similar_imgs, alpha=0.9)  # clean_target:0-1
 
     raw_dataset = create_poison_data(interpolation_imgs) # 0-1
     perturb_img_list, noise = generate_noise(base_model, criterion, optimizer, raw_dataset, intended_labels=torch.tensor(INTENDED_LABELS), MAX_ITERATION=10)
