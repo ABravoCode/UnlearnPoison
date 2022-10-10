@@ -36,10 +36,9 @@ INTENDED_LABELS = random.randint(0,9)
 while INTENDED_LABELS == clean_label:
     INTENDED_LABELS = random.randint(0,9)
 root = '../datasets/'
-BATCH_SIZE = 16
-NUM_POISON = 50
+BATCH_SIZE = 128
+NUM_POISON = 12
 
-NUM_POISON = 50
 
 class PerturbationTool():
     def __init__(self, seed=0, epsilon=0.03137254901, num_steps=20, step_size=0.00784313725):
@@ -74,15 +73,19 @@ class PerturbationTool():
                 perturb_img = torch.tensor(np.transpose(perturb_img.detach().cpu().numpy(), (0, 3, 1, 2)), requires_grad=True).cuda()
                 logits = model(perturb_img)
                 logits = logits.view(-1, 1*10)
+
                 if len(labels)==1:
                     labels = torch.tensor([lab for lab in labels for i in range(len(logits/10))]).cuda()
                 else:
                     continue
+                
                 loss = criterion(logits, labels)
             else:
                 logits, loss = criterion(model, perturb_img, labels, optimizer)    
+            
             perturb_img.retain_grad()
             loss.backward()
+            
             perturb_img_grad = perturb_img.grad.squeeze(0)
             perturb_img_grad = torch.tensor(np.transpose(perturb_img_grad.detach().cpu().numpy(), (1, 2, 0))).cuda()
             perturb_img_data = perturb_img.data.squeeze(0)
@@ -97,6 +100,52 @@ class PerturbationTool():
             perturb_img = Variable(torch.clamp(perturb_img, 0, 1), requires_grad=True)
 
         return perturb_img, eta
+
+    def min_max_attack(self, images, labels, model, optimizer, criterion, random_noise=None, sample_wise=False):
+        if random_noise is None:
+            random_noise = torch.FloatTensor(*images.shape).uniform_(-self.epsilon, self.epsilon).to(device)
+
+        images = images.reshape([1, 32, 32, 3])
+        perturb_img = Variable(images.data + random_noise, requires_grad=True)
+        perturb_img = Variable(torch.clamp(perturb_img, 0, 1), requires_grad=True)
+        perturb_img = perturb_img.cuda().detach()
+        perturb_img.requires_grad = True
+        
+        eta = random_noise
+        eta = torch.tensor(np.transpose(eta.detach().cpu().numpy(), (2, 0, 1))).cuda()
+        for _ in range(self.num_steps):
+            opt = torch.optim.SGD([perturb_img], lr=1e-3)
+            opt.zero_grad()
+            model.zero_grad()
+            if isinstance(criterion, torch.nn.CrossEntropyLoss):
+                perturb_img = torch.tensor(np.transpose(perturb_img.detach().cpu().numpy(), (0, 3, 1, 2)), requires_grad=True).cuda()
+                logits = model(perturb_img)
+                logits = logits.view(-1, 1*10)
+
+                if len(labels)==1:
+                    labels = torch.tensor([lab for lab in labels for i in range(len(logits/10))]).cuda()
+                else:
+                    continue
+
+                loss = criterion(logits, labels)
+            else:
+                logits, loss = criterion(model, perturb_img, labels, optimizer)
+            
+            perturb_img.retain_grad()
+            loss.backward()
+
+            perturb_img_grad = perturb_img.grad.squeeze(0)
+            perturb_img_grad = torch.tensor(np.transpose(perturb_img_grad.detach().cpu().numpy(), (1, 2, 0))).cuda()
+            perturb_img_data = perturb_img.data.squeeze(0)
+            perturb_img_data = torch.tensor(np.transpose(perturb_img_data.detach().cpu().numpy(), (1, 2, 0))).cuda()
+            
+            eta = self.step_size * perturb_img_grad.data.sign()
+            perturb_img = Variable(perturb_img_data + eta, requires_grad=True)
+            eta = torch.clamp(perturb_img_data - images.data, -self.epsilon, self.epsilon)
+            perturb_img = Variable(images.data + eta, requires_grad=True)
+            perturb_img = Variable(torch.clamp(perturb_img, 0, 1), requires_grad=True)
+
+            return perturb_img, eta
 
     def _patch_noise_extend_to_img(self, noise, image_size=[3, 32, 32], patch_location='center'):
         c, h, w = image_size[0], image_size[1], image_size[2]
@@ -159,7 +208,7 @@ def find_similar_img(target, k=50):
     return sim_group
 
 def linear_interpolation(target_img, sim_id_group, alpha=0.9): 
-    print(alpha)
+    print('Alpha:', alpha)
     target_img = target_img.cuda().reshape([3,32,32])
     ip_img = []
     sim_img = []
@@ -222,7 +271,7 @@ def generate_noise(base_model, criterion, optimizer, interpolation_imgs, intende
         
         perturb_img_list = []
         for i, (images) in tqdm(enumerate(interpolation_imgs), total=len(interpolation_imgs)):
-            perturb_img, eta = noise_generator.min_min_attack(images, target_labels, base_model, optimizer, criterion)
+            perturb_img, eta = noise_generator.min_max_attack(images, target_labels, base_model, optimizer, criterion)
             perturb_img_list.append(perturb_img.clone().detach().cpu())
         for i, delta in enumerate(eta):
             # print(noise.shape)
@@ -350,6 +399,7 @@ def train_new_poisoned_model(unlearnable_dataset, MAX_EPOCH=20, BATCH_SIZE=128):
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
         acc = correct / total
+        print(correct, total)
         tqdm.write('Clean Accuracy %.4f' % (acc*100))
         # Test target class
         # imshow(torch.tensor(clean_test_dataset.data[clean_target_id]).to(device))
@@ -358,7 +408,7 @@ def train_new_poisoned_model(unlearnable_dataset, MAX_EPOCH=20, BATCH_SIZE=128):
             logits = model(target)
             # print(logits)
             _, predicted = torch.max(logits.data, dim=1)
-            print('Current epoch: {}, Clean class: {}, Expected class: {}, Predicted class: {}'.format(epoch+1, CLASS[clean_label] , CLASS[INTENDED_LABELS], CLASS[int(predicted)]))
+            print('Epoch: {}, Clean class: {}, Expected class: {}, Predicted class: {}'.format(epoch+1, CLASS[clean_label] , CLASS[INTENDED_LABELS], CLASS[int(predicted)]))
     return predicted, model
 
 if __name__ == '__main__':
@@ -431,7 +481,7 @@ if __name__ == '__main__':
         torch.save(perturb_img_list, "./perturb_img_{}_{}.pt".format(clean_target_id, INTENDED_LABELS))
 
     unlearnable_dataset = UnlearnableDataset(INTENDED_LABELS)
-    pred, p_model = train_new_poisoned_model(unlearnable_dataset, MAX_EPOCH=10, BATCH_SIZE=256)
+    pred, p_model = train_new_poisoned_model(unlearnable_dataset, MAX_EPOCH=15, BATCH_SIZE=128)
     torch.save(p_model, 'poison_model_{}_{}.pth'.format(clean_target_id, INTENDED_LABELS))
     if pred == INTENDED_LABELS:
         print('Success.')
